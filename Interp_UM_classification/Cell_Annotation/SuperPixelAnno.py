@@ -1,31 +1,68 @@
 from PyQt5 import QtCore, QtGui, QtWidgets
+from PyQt5.QtCore import QDir, Qt, QEvent
+from PyQt5.QtGui import QImage, QPixmap, QPainter
+from PyQt5.QtWidgets import (QApplication, QComboBox, QFileDialog, QHBoxLayout,
+                             QLabel, QPushButton, QSizePolicy, QWidget,
+                             QVBoxLayout, QGraphicsView, QGraphicsScene)
 
-from PyQt5.QtCore import (QDir, QIODevice, QFile, QFileInfo, Qt, QTextStream,
-        QUrl)
-from PyQt5 import QtGui,QtCore
-from PyQt5.QtGui import QDesktopServices,QImage,QPixmap,qRgb, QPainter
-from PyQt5.QtWidgets import (QAbstractItemView, QApplication, QComboBox,
-        QDialog, QFileDialog, QGridLayout, QHBoxLayout, QHeaderView, QLabel,
-        QProgressDialog, QPushButton, QSizePolicy, QTableWidget,
-        QTableWidgetItem, QWidget, QGraphicsView, QGraphicsScene,QGraphicsItem)
-
-from openslide import OpenSlide
-from PIL.ImageQt import ImageQt
-from PIL import Image
 import json
 import numpy as np
 from util import *
 from copy import deepcopy
-# from time import gmtime, strftime
 import os
-import time
 from skimage.io import imread
 
 
+def numpy_to_qimage(arr):
+    """Convert numpy array to QImage.
+    
+    Args:
+        arr: Numpy array in RGB or grayscale format
+        
+    Returns:
+        QImage: Qt image object
+    """
+    if arr is None:
+        return QImage()
+    
+    # Ensure uint8 format
+    if arr.dtype != np.uint8:
+        arr = arr.astype(np.uint8)
+    
+    # Ensure C-contiguous array
+    arr = np.ascontiguousarray(arr)
+    
+    # Handle 3D arrays (RGB images)
+    if arr.ndim == 3 and arr.shape[2] >= 3:
+        h, w, _ = arr.shape
+        # Ensure RGB format (3 channels)
+        if arr.shape[2] == 3:
+            rgb_array = arr
+        else:
+            rgb_array = arr[:, :, :3]
+        bytes_per_line = 3 * w
+        qimage = QImage(rgb_array.tobytes(), w, h, bytes_per_line, QImage.Format_RGB888)
+        return qimage.copy()  # Return a copy to avoid memory issues
+    # Handle 2D arrays (grayscale)
+    elif arr.ndim == 2:
+        h, w = arr.shape
+        bytes_per_line = w
+        qimage = QImage(arr.tobytes(), w, h, bytes_per_line, QImage.Format_Grayscale8)
+        return qimage.copy()  # Return a copy to avoid memory issues
+    else:
+        return QImage()
+
+
 class PhotoViewer(QtWidgets.QGraphicsView):
+    """Image viewer with zoom and pan capabilities."""
     photoClicked = QtCore.pyqtSignal(QtCore.QPoint)
 
     def __init__(self, parent):
+        """Initialize the photo viewer.
+        
+        Args:
+            parent: Parent widget
+        """
         super(PhotoViewer, self).__init__(parent)
         self._zoom = 0
         self._empty = True
@@ -35,49 +72,46 @@ class PhotoViewer(QtWidgets.QGraphicsView):
         self.setScene(self._scene)
         self.setTransformationAnchor(QtWidgets.QGraphicsView.AnchorUnderMouse)
         self.setResizeAnchor(QtWidgets.QGraphicsView.AnchorUnderMouse)
-        self.setVerticalScrollBarPolicy(QtCore.Qt.ScrollBarAlwaysOff)
-        self.setHorizontalScrollBarPolicy(QtCore.Qt.ScrollBarAlwaysOff)
+        self.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)  # type: ignore
+        self.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)  # type: ignore
         self.setBackgroundBrush(QtGui.QBrush(QtGui.QColor(30, 30, 30)))
         self.setFrameShape(QtWidgets.QFrame.NoFrame)
-
-        # self.horizontalScrollBar().disconnect()
-        # self.verticalScrollBar().disconnect()
-
         self._isPanning = False
         self._mousePressedRight = False
-
-        # self._rect = QtCore.QRectF(0, 0, 10000, 10000)
     def hasPhoto(self):
         return not self._empty
 
-    def fitInView(self, scale=True):
+    def fitInView(self):
+        """Fit image to view."""
         rect_image = QtCore.QRectF(self._photo.pixmap().rect())
-        # print(('rect_image', rect_image))
         rect = QtCore.QRectF(self.rect())
         if not rect.isNull():
             self.setSceneRect(rect)
             if self.hasPhoto():
                 unity = self.transform().mapRect(QtCore.QRectF(0, 0, 1, 1))
                 self.scale(1 / unity.width(), 1 / unity.height())
-                viewrect = self.viewport().rect()
-                scenerect = self.transform().mapRect(rect_image)
-                factor = min(viewrect.width() / scenerect.width(),
-                             viewrect.height() / scenerect.height())
-                self.scale(factor, factor)
-                # print('viewrect',viewrect)
-                # print('scenerect',scenerect)
+                viewport = self.viewport()
+                if viewport:
+                    viewrect = viewport.rect()
+                    scenerect = self.transform().mapRect(rect_image)
+                    factor = min(viewrect.width() / scenerect.width(),
+                                 viewrect.height() / scenerect.height())
+                    self.scale(factor, factor)
             self._zoom = 0
     def setPhoto(self, pixmap=None):
+        """Set image to display.
+        
+        Args:
+            pixmap: QPixmap to display
+        """
         if pixmap:
-            self.pixmap=pixmap
+            self.pixmap = pixmap
         self._zoom = 0
         if pixmap and not pixmap.isNull():
             self._empty = False
-            # self.setDragMode(QtWidgets.QGraphicsView.ScrollHandDrag)
             self._photo.setPixmap(pixmap)
         else:
             self._empty = True
-            # self.setDragMode(QtWidgets.QGraphicsView.NoDrag)
             self._photo.setPixmap(QtGui.QPixmap())
         self.fitInView()
 
@@ -85,20 +119,34 @@ class PhotoViewer(QtWidgets.QGraphicsView):
 
 
 class Window(QtWidgets.QWidget):
+    """Main application window for super-pixel annotation."""
+    
     def __init__(self):
+        """Initialize the application window."""
         super(Window, self).__init__()
+        
+        # Initialize image data attributes
+        self.image = None
+        self.SLIC = None
+        self.SLIC_visualization = None
+        self.SLIC_visualization_ori = None
+        self.image_path = None
+        self.image_name = None
 
         self.viewer1 = PhotoViewer(self)
         self.viewer2 = PhotoViewer(self)
 
         self.viewer1.setAcceptDrops(True)
         self.viewer1.setMouseTracking(True)
-        # self.setMouseTracking(True)
         self.viewer2.setAcceptDrops(True)
         self.viewer2.setMouseTracking(True)
-        self.viewer1.viewport().installEventFilter(self)
-        self.viewer2.viewport().installEventFilter(self)
-
+        
+        vp1 = self.viewer1.viewport()
+        vp2 = self.viewer2.viewport()
+        if vp1:
+            vp1.installEventFilter(self)
+        if vp2:
+            vp2.installEventFilter(self)
 
         browse_ImagePathButton = self.createButton("&Browse...", self.browse_ImagePath)
         LoadImageButton = self.createButton("&Load Image", self.loadImage)
@@ -107,203 +155,293 @@ class Window(QtWidgets.QWidget):
         BadButton = self.createButton("&Bad", self.Bad)
 
         self.directoryComboBox_ImagePath = self.createComboBox(QDir.currentPath())
-
         directoryLabel_ImagePath = QLabel("Image Path:")
-
 
         # Arrange layout
         VBlayout = QtWidgets.QVBoxLayout(self)
         HBlayout0 = QtWidgets.QHBoxLayout()
-        HBlayout0.setAlignment(QtCore.Qt.AlignLeft)
+        HBlayout0.setAlignment(Qt.AlignLeft)  # type: ignore
         HBlayout0.addWidget(self.viewer1)
         HBlayout0.addWidget(self.viewer2)
         VBlayout.addLayout(HBlayout0)
 
         VBlayout1 = QtWidgets.QVBoxLayout()
-
         HBlayout2 = QtWidgets.QHBoxLayout()
-        HBlayout2.setAlignment(QtCore.Qt.AlignLeft)
+        HBlayout2.setAlignment(Qt.AlignLeft)  # type: ignore
         HBlayout2.addWidget(directoryLabel_ImagePath)
         HBlayout2.addWidget(self.directoryComboBox_ImagePath)
         HBlayout2.addWidget(browse_ImagePathButton)
         VBlayout1.addLayout(HBlayout2)
 
         HBlayout6 = QtWidgets.QHBoxLayout()
-        HBlayout6.setAlignment(QtCore.Qt.AlignRight)
+        HBlayout6.setAlignment(Qt.AlignRight)  # type: ignore
         HBlayout6.addWidget(GoodButton)
         HBlayout6.addWidget(BadButton)
         HBlayout6.addWidget(LoadImageButton)
         HBlayout6.addWidget(FinishButton)
         VBlayout1.addLayout(HBlayout6)
-
         VBlayout.addLayout(VBlayout1)
 
-        self.loaded_img_bool=False
-        self.image_path = None
-
-        self.anno_all = {}
-        self.anno_all['good'] = []
-        self.anno_all['bad'] = []
+        self.anno_all = {'good': [], 'bad': []}
         self.anno_temp = []
 
     def loadImage(self):
-
-        # self.viewer.setPhoto(QtGui.QPixmap('/Users/hc/Documents/Uveal Melanoma/Slide 10/1233.png'))
-        self.InitializationPreperation()
-
-        qim = ImageQt(deepcopy(Image.fromarray(self.image)))
-        qim_state = ImageQt(deepcopy(Image.fromarray(self.SLIC_visualization)))
-        self.viewer1.setPhoto(QPixmap(QtGui.QPixmap.fromImage(qim)))
-        self.viewer2.setPhoto(QPixmap(QtGui.QPixmap.fromImage(qim_state)))
+        """Load and display image with SLIC visualization."""
+        if self.image is None or self.SLIC is None:
+            print("Error: Image or SLIC data not loaded")
+            return
         
-        self.loaded_img_bool = True
-        self.anno_all = {}
-        self.anno_all['good'] = []
-        self.anno_all['bad'] = []
-        self.anno_temp = []
+        if self.image.ndim < 2:
+            print("Error: Image must be at least 2D")
+            return
+        
+        if self.SLIC is None or self.SLIC.ndim != 2:
+            print("Error: SLIC data must be 2D")
+            return
+        
+        try:
+            self.InitializationPreparation()
+            if self.image is not None:
+                qim = numpy_to_qimage(self.image.astype(np.uint8) if self.image.dtype != np.uint8 else self.image)
+                self.viewer1.setPhoto(QPixmap(qim))
+            
+            if self.SLIC_visualization is not None:
+                qim_state = numpy_to_qimage(self.SLIC_visualization.astype(np.uint8))
+                self.viewer2.setPhoto(QPixmap(qim_state))
+            
+            self.anno_all = {'good': [], 'bad': []}
+            self.anno_temp = []
+        except Exception as e:
+            print(f"Error loading image: {e}")
 
-    def done_color(self,labels,r,g,b):
-        for i in labels:
-            self.SLIC_visualization[:,:,0][self.SLIC == i] = r
-            self.SLIC_visualization[:,:,1][self.SLIC == i] = g
-            self.SLIC_visualization[:,:,2][self.SLIC == i] = b 
-        print('color changed')
-        qim_state = ImageQt(deepcopy(Image.fromarray(self.SLIC_visualization)))
-        self.viewer2.setPhoto(QPixmap(QtGui.QPixmap.fromImage(qim_state)))
-        self.viewer2.horizontalScrollBar().setValue(0)
-        self.viewer2.verticalScrollBar().setValue(0)
+    def done_color(self, labels, r, g, b):
+        """Update SLIC visualization with new colors.
+        
+        Args:
+            labels: List of SLIC labels to recolor
+            r: Red value (0-255)
+            g: Green value (0-255)
+            b: Blue value (0-255)
+        """
+        if self.SLIC is None or self.SLIC_visualization is None:
+            return
+        
+        for label in labels:
+            if np.any(self.SLIC == label):
+                self.SLIC_visualization[self.SLIC == label, 0] = r
+                self.SLIC_visualization[self.SLIC == label, 1] = g
+                self.SLIC_visualization[self.SLIC == label, 2] = b
+        
+        qim_state = numpy_to_qimage(self.SLIC_visualization.astype(np.uint8))
+        self.viewer2.setPhoto(QPixmap(qim_state))
+        hbar = self.viewer2.horizontalScrollBar()
+        vbar = self.viewer2.verticalScrollBar()
+        if hbar:
+            hbar.setValue(0)
+        if vbar:
+            vbar.setValue(0)
 
     def Good(self):
+        """Mark current annotation as good."""
+        if not self.anno_temp:
+            print("No pixels selected")
+            return
+        
         self.anno_all['good'].append(list(set(self.anno_temp)))
-
-        self.done_color(self.anno_temp,255,255,0)
-
+        self.done_color(self.anno_temp, 255, 255, 0)
         self.anno_temp = []
-        print(self.anno_all)
 
     def Bad(self):
+        """Mark current annotation as bad."""
+        if not self.anno_temp:
+            print("No pixels selected")
+            return
+        
         self.anno_all['bad'].append(list(set(self.anno_temp)))
-
-        self.done_color(self.anno_temp,0,0,255)
-
+        self.done_color(self.anno_temp, 0, 0, 255)
         self.anno_temp = []
-        print(self.anno_all)
 
-    def pixInfo(self):
-        self.viewer1.toggleDragMode()
-        self.viewer2.toggleDragMode()
-
-    def browse(self,phase=None):
-        print(phase)        
-        if phase in ['ImagePath']:
-            # if self.image_path:
-            #     directory = QFileDialog.getOpenFileName(self, "Find Files",
-            #              self.image_path)
-            # else:
-            #     directory = QFileDialog.getOpenFileName(self, "Find Files",
-            #              QDir.currentPath())
-            directory = QFileDialog.getOpenFileName(self, "Find Files",
-                    '/Users/hc/Documents/JHU/PJ/Mathias/microscopy/Nature/Cervical_cancer/data/generated_data/SLIC_anno_200_0.1')
-            if directory:
-                if getattr(self,'directoryComboBox_'+phase).findText(directory[0]) == -1:
-                    getattr(self,'directoryComboBox_'+phase).addItem(directory[0])
-                getattr(self,'directoryComboBox_'+phase).setCurrentIndex(getattr(self,'directoryComboBox_'+phase).findText(directory[0]))
-            
-            path = getattr(self,'directoryComboBox_'+phase).currentText()
-            print(path)
-            self.image_path = '/'.join(path.split('/')[:-1])
-            self.image_name = path.split('/')[-1].split('.')[0]
-            
-            if phase == 'ImagePath':
-                self.image = imread(path)
-                self.SLIC = np.load('/'.join(path.split('/')[:-1])+'/'+path.split('/')[-1].split('.')[0]+'.npy')
-        self.loadImage()
-
-        # else:
-        #     directory = QFileDialog.getExistingDirectory(self, "Find Files",
-        #             QDir.currentPath())
-        #     if directory:
-        #         if getattr(self,'directoryComboBox_'+phase).findText(directory) == -1:
-        #             getattr(self,'directoryComboBox_'+phase).addItem(directory)
-        #         getattr(self,'directoryComboBox_'+phase).setCurrentIndex(getattr(self,'directoryComboBox_'+phase).findText(directory))
-            
-        #     setattr(self,phase+'_dir',getattr(self,'directoryComboBox_'+phase).currentText())
-        #     print(phase+'_dir',getattr(self,phase+'_dir'))
+    def browse(self, phase=None):
+        """Browse and load image file.
+        
+        Args:
+            phase: Phase identifier (currently only 'ImagePath' is supported)
+        """
+        if phase != 'ImagePath':
+            return
+        
+        default_dir = self.image_path if self.image_path else QDir.currentPath()
+        directory = QFileDialog.getOpenFileName(self, "Find Files", default_dir)
+        
+        if not directory or not directory[0]:
+            return
+        
+        path = directory[0]
+        if self.directoryComboBox_ImagePath.findText(path) == -1:
+            self.directoryComboBox_ImagePath.addItem(path)
+        self.directoryComboBox_ImagePath.setCurrentIndex(
+            self.directoryComboBox_ImagePath.findText(path))
+        
+        self.image_path = os.path.dirname(path)
+        self.image_name = os.path.splitext(os.path.basename(path))[0]
+        
+        try:
+            self.image = imread(path)
+            slic_path = os.path.join(self.image_path, self.image_name + '.npy')
+            self.SLIC = np.load(slic_path)
+            self.loadImage()
+        except FileNotFoundError as e:
+            print(f"File not found: {e}")
+        except Exception as e:
+            print(f"Error loading image or SLIC data: {e}")
 
     def browse_ImagePath(self):
         self.browse('ImagePath')
 
-    def InitializationPreperation(self):
-        # create the SLIC image
-        self.SLIC_visualization = np.zeros_like(self.image)
-        for i in np.unique(self.SLIC):
-            for j in range(3):
-                self.SLIC_visualization[:,:,j][self.SLIC == i] = np.average(self.image[:,:,j][self.SLIC == i])
-        self.SLIC_visualization_ori = deepcopy(self.SLIC_visualization)
+    def InitializationPreparation(self):
+        """Create SLIC visualization from image and labels."""
+        if self.image is None or self.SLIC is None:
+            return
+        
+        self.SLIC_visualization = np.zeros_like(self.image, dtype=np.float32)
+        for label in np.unique(self.SLIC):
+            mask = self.SLIC == label
+            num_channels = min(3, self.image.shape[2] if self.image.ndim >= 3 else 1)
+            for j in range(num_channels):
+                if self.image.ndim >= 3:
+                    self.SLIC_visualization[mask, j] = np.mean(self.image[mask, j])
+                else:
+                    self.SLIC_visualization[mask, j] = np.mean(self.image[mask])
+        
+        self.SLIC_visualization_ori = self.SLIC_visualization.copy()
 
     def createButton(self, text, member):
+        """Create a push button.
+        
+        Args:
+            text: Button label
+            member: Function to call when clicked
+            
+        Returns:
+            QPushButton: Created button
+        """
         button = QPushButton(text)
         button.clicked.connect(member)
         return button
+    
     def createComboBox(self, text=""):
+        """Create a combo box.
+        
+        Args:
+            text: Initial text/item
+            
+        Returns:
+            QComboBox: Created combo box
+        """
         comboBox = QComboBox()
         comboBox.setEditable(True)
         comboBox.addItem(text)
         comboBox.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
         return comboBox
 
-    def eventFilter(self, object, event):
-        # print(event.type())
-        if event.type() == QtCore.QEvent.MouseButtonPress:
-            if event.button() == Qt.RightButton:                
-                if event.globalX() >= self.viewer2.x():  
-                    scale_factor = self.viewer2.transform().m11()
-                    canvas_x = self.viewer2.horizontalScrollBar().value() + event.x()
-                    canvas_y = self.viewer2.verticalScrollBar().value() + event.y()
-
-                    print(canvas_x,canvas_y,canvas_x//scale_factor,canvas_y//scale_factor)
-                    label = self.SLIC[int(canvas_y//scale_factor),int(canvas_x//scale_factor)]
-                    if label not in self.anno_temp:
-                        self.done_color([label],0,255,0)
-                        self.anno_temp.append(int(label))
-                    else:
-                        _x = int(canvas_y//scale_factor)
-                        _y = int(canvas_x//scale_factor)
-                        _r = self.SLIC_visualization_ori[_x,_y,0]
-                        _g = self.SLIC_visualization_ori[_x,_y,1]
-                        _b = self.SLIC_visualization_ori[_x,_y,2]
-                        self.done_color([label],_r,_g,_b)
-                        while label in self.anno_temp:
-                            self.anno_temp.remove(label)
-                    print(self.anno_temp)
-                    self.viewer2.horizontalScrollBar().setValue(0)
-                    self.viewer2.verticalScrollBar().setValue(0)
+    def eventFilter(self, obj, event):
+        """Handle mouse click events for label selection.
+        
+        Args:
+            obj: Object that triggered the event
+            event: Event information
+            
+        Returns:
+            bool: True if event was handled
+        """
+        if event.type() != QEvent.MouseButtonPress:  # type: ignore
+            return False
+        
+        if event.button() != Qt.RightButton:  # type: ignore
+            return False
+        
+        if event.globalX() < self.viewer2.x():
+            return False
+        
+        if self.SLIC is None or self.SLIC_visualization is None:
+            return False
+        
+        try:
+            scale_factor = self.viewer2.transform().m11()
+            if scale_factor == 0:
+                return False
+            
+            hbar = self.viewer2.horizontalScrollBar()
+            vbar = self.viewer2.verticalScrollBar()
+            if not hbar or not vbar:
+                return False
+            
+            canvas_x = hbar.value() + event.x()
+            canvas_y = vbar.value() + event.y()
+            
+            x = int(canvas_y // scale_factor)
+            y = int(canvas_x // scale_factor)
+            
+            # Bounds checking
+            if x < 0 or x >= self.SLIC.shape[0] or y < 0 or y >= self.SLIC.shape[1]:
+                return False
+            
+            label = int(self.SLIC[x, y])
+            
+            if label not in self.anno_temp:
+                self.done_color([label], 0, 255, 0)
+                self.anno_temp.append(label)
+            else:
+                if self.SLIC_visualization_ori is not None:
+                    r = int(self.SLIC_visualization_ori[x, y, 0])
+                    g = int(self.SLIC_visualization_ori[x, y, 1])
+                    b = int(self.SLIC_visualization_ori[x, y, 2])
+                    self.done_color([label], r, g, b)
+                while label in self.anno_temp:
+                    self.anno_temp.remove(label)
+            
+            if hbar:
+                hbar.setValue(0)
+            if vbar:
+                vbar.setValue(0)
+        except (IndexError, ValueError, ZeroDivisionError) as e:
+            print(f"Error processing click: {e}")
+            return False
+        
         return False
     
     def keyPressEvent(self, e):
-        if e.key() == Qt.Key_Q:
+        """Handle keyboard shortcuts.
+        
+        Args:
+            e: Key event
+        """
+        if e.key() == Qt.Key_Q:  # type: ignore
             self.Good()
-        elif e.key() == Qt.Key_E:
-            self.Bad()    
-
-    def buildExamplePopup(self,img_extract):
-        # name = item.text()
-        exPopup = examplePopup(img_extract)
-        self.exPopup = exPopup
-        self.exPopup.got_annotation.connect(self.got_single_annotation)
-        # self.exPopup.setGeometry(QtCore.QRect(100, 100, 600, 600))
-        self.exPopup.show()
-
+        elif e.key() == Qt.Key_E:  # type: ignore
+            self.Bad()
 
     def finish(self):
-        with open(os.path.join(self.image_path,self.image_name+'.anno'),'w') as a:
-                json.dump(self.anno_all,a,indent=4)
-        self.anno_all = {}
-        self.anno_all['good'] = []
-        self.anno_all['bad'] = []
+        """Save annotations to file and reset state."""
+        if not self.image_path or not self.image_name:
+            print("Error: No image loaded. Please load an image first.")
+            return
+        
+        try:
+            anno_file = os.path.join(self.image_path, self.image_name + '.anno')
+            with open(anno_file, 'w') as f:
+                json.dump(self.anno_all, f, indent=4)
+            print(f"Annotations saved to {anno_file}")
+        except IOError as e:
+            print(f"Error saving annotations: {e}")
+            return
+        
+        # Reset state
+        self.anno_all = {'good': [], 'bad': []}
         self.anno_temp = []
         self.SLIC_visualization = None
         self.image = None
+        self.SLIC = None
 
 
 
