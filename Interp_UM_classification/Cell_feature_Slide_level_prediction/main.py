@@ -10,32 +10,22 @@ import time,datetime
 import pandas as pd
 from sklearn.metrics import classification_report,roc_auc_score
 
-from monai.apps import download_and_extract
-from monai.config import print_config
-from monai.data import decollate_batch
-from monai.metrics import ROCAUCMetric
-from monai.networks.nets import DenseNet121
-from monai.transforms import (
-    Activations,
-    AddChannel,
-    AsDiscrete,
-    Compose,
-    LoadImage,
-    RandFlip,
-    RandRotate,
-    RandZoom,
-    ScaleIntensity,
-    EnsureType,
-    Transpose
-)
-from monai.utils import set_determinism
-
+from monai.config.deviceconfig import print_config
+from monai.metrics.rocauc import ROCAUCMetric
+from monai.transforms.compose import Compose
+from monai.transforms.io.array import LoadImage
+from monai.transforms.spatial.array import RandFlip, RandRotate, RandZoom
+from monai.transforms.intensity.array import ScaleIntensity
+from monai.transforms.utility.array import EnsureType, Transpose
+from monai.transforms.post.array import AsDiscrete, Activations
+from monai.utils.misc import set_determinism
+set_determinism(seed=0)
 from dataset import CellDataset
 from util import time_estimation,time_convertion
 from model import MLP
 
-DATA_DIR = "C:\\Project\\Cell_method\\Data"
-root_dir = ".\\models"
+DATA_DIR = r"C:\Users\diavi\OneDrive\Desktop\PINN_project\uveal_melanoma\Interp_UM_classification\images\slide_images"
+root_dir = r"C:\Users\diavi\OneDrive\Desktop\PINN_project\uveal_melanoma\Interp_UM_classification\models"
 num_class=2
 learning_rate = 1e-3
 max_epochs = 200
