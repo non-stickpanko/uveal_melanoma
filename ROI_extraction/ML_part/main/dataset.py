@@ -16,14 +16,27 @@ class fine_clustering_dataset(Dataset):
 		if final_test:
 			self.path_list = glob('/home/hchen135/uveal_melanoma/data/annotated_data/data_128/*')
 		else:	
-			if 'data_not_train' not in config or config['data_not_train'] == []:
-				self.path_list = glob(config['input_dir']+'/Slide */*')
-			else:
+			# Try to find data using Slide_* pattern (works for both numeric and named slides)
+			self.path_list = glob(os.path.join(config['input_dir'], 'Slide_*', '*'))
+			self.path_list = self.path_list[:200]  # ← add this line to limit to 200 images
+			print('num of data: ', len(self.path_list))
+			
+			# If using numeric filtering with data_not_train, apply that filter
+			if 'data_not_train' in config and config['data_not_train'] and len(self.path_list) == 0:
+				# Fallback: try numeric slide naming if glob found nothing
 				self.path_list = []
 				data_to_train = [i for i in range(1,101) if i not in config['data_not_train']]
 				for i in data_to_train:
-					self.path_list = self.path_list + glob(config['input_dir']+'/Slide '+str(i)+'/*')
+					self.path_list = self.path_list + glob(os.path.join(config['input_dir'], f'Slide_{i}', '*'))
+		
 		print('num of data: ',len(self.path_list))
+		if len(self.path_list) == 0:
+			print(f"WARNING: No data found in {config['input_dir']}")
+			print(f"Expected structure: {config['input_dir']}/Slide_*/")
+			print(f"Current working directory: {os.getcwd()}")
+			print(f"Absolute path would be: {os.path.abspath(config['input_dir'])}")
+			if not os.path.exists(config['input_dir']):
+				raise FileNotFoundError(f"Input directory does not exist: {config['input_dir']}")
 		
 		# Get len info
 		# self.fine_height = self.config.fine_height
